@@ -6,6 +6,7 @@ from .events import *
 from .nodes import *
 
 from .loader import *
+from .authorized import *
 from .dumper import *
 
 __version__ = '7.0.0.dev0'

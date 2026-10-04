@@ -5,6 +5,15 @@ For a complete changelog, see:
 
 7.0.0.dev0 (TBD)
 
+* Add AuthorizedSafeLoader for per-load tag authorization.  When extending
+  SafeLoader with custom tags, an authorization list can be supplied for
+  each load: only the tag constructors in the list (plus the standard safe
+  YAML tags) are allowed to execute.  The constructor table is frozen when
+  the loader is instantiated, so constructors registered later by other
+  modules cannot leak into a load.  Python object construction is never
+  permitted.  The global SafeLoader table is never modified, and the existing
+  default load entries maintain their original behaviour.
+
 * TBD
 
 6.0.2 (2024-08-06)
