@@ -5,6 +5,17 @@ For a complete changelog, see:
 
 7.0.0.dev0 (TBD)
 
+* https://github.com/yaml/pyyaml/issues/163 -- Add explicit key collision
+  reporting when constructing mappings. Collisions are distinguished between
+  raw source duplicates (same scalar tag and source text) and typed
+  collisions (different tags/text resolving to equal Python keys, such as
+  ``true`` and ``1``); reports retain both scalar tags and both source
+  positions without using ``str(key)`` for identity. Default loaders keep
+  their last-value-wins semantics and merely collect the reports, while the
+  new ``StrictSafeLoader``/``StrictFullLoader``/``StrictUnsafeLoader``
+  (and ``C*`` equivalents) reject colliding mappings before constructing any
+  mapping value.
+
 * TBD
 
 6.0.2 (2024-08-06)

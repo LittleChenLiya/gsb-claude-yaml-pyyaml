@@ -1,6 +1,8 @@
 
 __all__ = [
     'CBaseLoader', 'CSafeLoader', 'CFullLoader', 'CUnsafeLoader', 'CLoader',
+    'CStrictSafeLoader', 'CStrictFullLoader', 'CStrictUnsafeLoader',
+    'CStrictLoader',
     'CBaseDumper', 'CSafeDumper', 'CDumper'
 ]
 
@@ -47,6 +49,29 @@ class CLoader(CParser, Constructor, Resolver):
         CParser.__init__(self, stream)
         Constructor.__init__(self)
         Resolver.__init__(self)
+
+class CStrictFullLoader(CParser, StrictFullConstructor, Resolver):
+
+    def __init__(self, stream):
+        CParser.__init__(self, stream)
+        StrictFullConstructor.__init__(self)
+        Resolver.__init__(self)
+
+class CStrictSafeLoader(CParser, StrictSafeConstructor, Resolver):
+
+    def __init__(self, stream):
+        CParser.__init__(self, stream)
+        StrictSafeConstructor.__init__(self)
+        Resolver.__init__(self)
+
+class CStrictUnsafeLoader(CParser, StrictUnsafeConstructor, Resolver):
+
+    def __init__(self, stream):
+        CParser.__init__(self, stream)
+        StrictUnsafeConstructor.__init__(self)
+        Resolver.__init__(self)
+
+CStrictLoader = CStrictUnsafeLoader
 
 class CBaseDumper(CEmitter, BaseRepresenter, BaseResolver):
 

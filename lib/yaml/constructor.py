@@ -5,7 +5,13 @@ __all__ = [
     'FullConstructor',
     'UnsafeConstructor',
     'Constructor',
-    'ConstructorError'
+    'ConstructorError',
+    'KeyCollision',
+    'KeyCollisionError',
+    'StrictConstructor',
+    'StrictSafeConstructor',
+    'StrictFullConstructor',
+    'StrictUnsafeConstructor',
 ]
 
 from .error import *
@@ -16,16 +22,131 @@ import collections.abc, datetime, base64, binascii, re, sys, types
 class ConstructorError(MarkedYAMLError):
     pass
 
+class KeyCollision:
+    """A report of two keys in a mapping that resolve to the same Python key.
+
+    The collision is classified as either:
+
+    * ``'source'``: both keys are scalar nodes with the same tag and the same
+      raw YAML source text (a plain textual duplicate), or are the very same
+      non-scalar node;
+    * ``'typed'``: the constructed Python keys compare equal even though the
+      keys differ in source text and/or tag (for example ``true`` and ``1``).
+
+    The two originating key nodes, their scalar tags and their start marks are
+    retained so callers do not have to rely on ``str(key)`` to identify the
+    colliding keys.
+    """
+
+    def __init__(self, mapping_node, first_key_node, duplicate_key_node,
+            first_key, duplicate_key, kind):
+        self.mapping_node = mapping_node
+        self.first_key_node = first_key_node
+        self.duplicate_key_node = duplicate_key_node
+        self.first_key = first_key
+        self.duplicate_key = duplicate_key
+        self.kind = kind
+
+    @property
+    def first_tag(self):
+        return self.first_key_node.tag
+
+    @property
+    def duplicate_tag(self):
+        return self.duplicate_key_node.tag
+
+    @property
+    def first_mark(self):
+        return self.first_key_node.start_mark
+
+    @property
+    def duplicate_mark(self):
+        return self.duplicate_key_node.start_mark
+
+    def __repr__(self):
+        return 'KeyCollision(%r, %r, %r, %r)' % (
+                self.kind, self.first_tag, self.duplicate_tag,
+                self.duplicate_mark)
+
+
+def _describe_key_node(key_node):
+    if isinstance(key_node, ScalarNode):
+        return "scalar %r tagged %s" % (key_node.value, key_node.tag)
+    return "%s tagged %s" % (key_node.id, key_node.tag)
+
+
+def _same_key_source(first_node, duplicate_node):
+    """Tell whether two key nodes are duplicates in the source text.
+
+    Identity is determined from the nodes themselves (tags and raw scalar
+    values), never from ``str()`` of the constructed Python keys. Non-scalar
+    keys are only considered source duplicates when they are the very same
+    node, so aliased collections merge exactly as they did before.
+    """
+    if first_node is duplicate_node:
+        return True
+    if isinstance(first_node, ScalarNode) \
+            and isinstance(duplicate_node, ScalarNode):
+        return first_node.tag == duplicate_node.tag \
+                and first_node.value == duplicate_node.value
+    return False
+
+
+class KeyCollisionError(ConstructorError):
+    """Raised by strict constructors when a mapping contains colliding keys."""
+
+    def __init__(self, collision):
+        self.collision = collision
+        if collision.kind == 'source':
+            problem = "found duplicate key %s" \
+                    % _describe_key_node(collision.duplicate_key_node)
+        else:
+            problem = "found key %s which collides with the earlier key %s; " \
+                    "both keys resolve to the same Python key" \
+                    % (_describe_key_node(collision.duplicate_key_node),
+                       _describe_key_node(collision.first_key_node))
+        note = "first occurrence of the key %s" \
+                % _describe_key_node(collision.first_key_node)
+        super().__init__(
+                "while constructing a mapping",
+                collision.mapping_node.start_mark,
+                problem, collision.duplicate_key_node.start_mark, note)
+
+    @property
+    def first_key_node(self):
+        return self.collision.first_key_node
+
+    @property
+    def duplicate_key_node(self):
+        return self.collision.duplicate_key_node
+
+    @property
+    def first_key(self):
+        return self.collision.first_key
+
+    @property
+    def duplicate_key(self):
+        return self.collision.duplicate_key
+
+    @property
+    def collision_kind(self):
+        return self.collision.kind
+
 class BaseConstructor:
 
     yaml_constructors = {}
     yaml_multi_constructors = {}
+
+    # When True, constructing a mapping with colliding keys raises
+    # KeyCollisionError before any value in that mapping is constructed.
+    strict_key_collisions = False
 
     def __init__(self):
         self.constructed_objects = {}
         self.recursive_objects = {}
         self.state_generators = []
         self.deep_construct = False
+        self.key_collisions = []
 
     def check_data(self):
         # If there are more documents available?
@@ -129,17 +250,65 @@ class BaseConstructor:
         return [self.construct_object(child, deep=deep)
                 for child in node.value]
 
+    def report_key_collision(self, collision):
+        """Record an explicit key collision report.
+
+        Default (non-strict) constructors simply collect the report and keep
+        the historical last-value-wins mapping semantics. Override this method
+        to turn the reports into warnings or any other side effect.
+        """
+        self.key_collisions.append(collision)
+
+    def make_key_collision(self, node, first_key_node, duplicate_key_node,
+            first_key, duplicate_key):
+        if _same_key_source(first_key_node, duplicate_key_node):
+            kind = 'source'
+        else:
+            kind = 'typed'
+        return KeyCollision(node, first_key_node, duplicate_key_node,
+                first_key, duplicate_key, kind)
+
+    def check_mapping_key_collisions(self, node, deep=False):
+        """Construct every mapping key and fail on the first collision.
+
+        Only keys are constructed here, never values, so a strict failure
+        cannot trigger the constructors of mapping values.
+        """
+        first_keys = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, collections.abc.Hashable):
+                raise ConstructorError("while constructing a mapping",
+                        node.start_mark,
+                        "found unhashable key", key_node.start_mark)
+            if key in first_keys:
+                first_key, first_key_node = first_keys[key]
+                collision = self.make_key_collision(node, first_key_node,
+                        key_node, first_key, key)
+                self.report_key_collision(collision)
+                raise KeyCollisionError(collision)
+            first_keys[key] = (key, key_node)
+
     def construct_mapping(self, node, deep=False):
         if not isinstance(node, MappingNode):
             raise ConstructorError(None, None,
                     "expected a mapping node, but found %s" % node.id,
                     node.start_mark)
+        if self.strict_key_collisions:
+            self.check_mapping_key_collisions(node, deep=deep)
         mapping = {}
+        first_keys = {}
         for key_node, value_node in node.value:
             key = self.construct_object(key_node, deep=deep)
             if not isinstance(key, collections.abc.Hashable):
                 raise ConstructorError("while constructing a mapping", node.start_mark,
                         "found unhashable key", key_node.start_mark)
+            if key in first_keys:
+                first_key, first_key_node = first_keys[key]
+                self.report_key_collision(self.make_key_collision(node,
+                        first_key_node, key_node, first_key, key))
+            else:
+                first_keys[key] = (key, key_node)
             value = self.construct_object(value_node, deep=deep)
             mapping[key] = value
         return mapping
@@ -745,7 +914,22 @@ UnsafeConstructor.add_multi_constructor(
     'tag:yaml.org,2002:python/object/apply:',
     UnsafeConstructor.construct_python_object_apply)
 
+class StrictConstructor:
+    # Mixin shared by the strict constructor variants: mappings containing
+    # keys that collide after construction (``true`` vs ``1`` included) raise
+    # KeyCollisionError before mapping values are constructed.
+    strict_key_collisions = True
+
+class StrictSafeConstructor(StrictConstructor, SafeConstructor):
+    pass
+
+class StrictFullConstructor(StrictConstructor, FullConstructor):
+    pass
+
 # Constructor is same as UnsafeConstructor. Need to leave this in place in case
 # people have extended it directly.
 class Constructor(UnsafeConstructor):
+    pass
+
+class StrictUnsafeConstructor(StrictConstructor, UnsafeConstructor):
     pass
