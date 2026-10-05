@@ -15,37 +15,37 @@ from .resolver import *
 
 class CBaseLoader(CParser, BaseConstructor, BaseResolver):
 
-    def __init__(self, stream):
+    def __init__(self, stream, strict=False):
         CParser.__init__(self, stream)
-        BaseConstructor.__init__(self)
+        BaseConstructor.__init__(self, strict=strict)
         BaseResolver.__init__(self)
 
 class CSafeLoader(CParser, SafeConstructor, Resolver):
 
-    def __init__(self, stream):
+    def __init__(self, stream, strict=False):
         CParser.__init__(self, stream)
-        SafeConstructor.__init__(self)
+        SafeConstructor.__init__(self, strict=strict)
         Resolver.__init__(self)
 
 class CFullLoader(CParser, FullConstructor, Resolver):
 
-    def __init__(self, stream):
+    def __init__(self, stream, strict=False):
         CParser.__init__(self, stream)
-        FullConstructor.__init__(self)
+        FullConstructor.__init__(self, strict=strict)
         Resolver.__init__(self)
 
 class CUnsafeLoader(CParser, UnsafeConstructor, Resolver):
 
-    def __init__(self, stream):
+    def __init__(self, stream, strict=False):
         CParser.__init__(self, stream)
-        UnsafeConstructor.__init__(self)
+        UnsafeConstructor.__init__(self, strict=strict)
         Resolver.__init__(self)
 
 class CLoader(CParser, Constructor, Resolver):
 
-    def __init__(self, stream):
+    def __init__(self, stream, strict=False):
         CParser.__init__(self, stream)
-        Constructor.__init__(self)
+        Constructor.__init__(self, strict=strict)
         Resolver.__init__(self)
 
 class CBaseDumper(CEmitter, BaseRepresenter, BaseResolver):

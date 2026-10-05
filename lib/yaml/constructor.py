@@ -21,11 +21,12 @@ class BaseConstructor:
     yaml_constructors = {}
     yaml_multi_constructors = {}
 
-    def __init__(self):
+    def __init__(self, strict=False):
         self.constructed_objects = {}
         self.recursive_objects = {}
         self.state_generators = []
         self.deep_construct = False
+        self.strict = strict
 
     def check_data(self):
         # If there are more documents available?
@@ -134,6 +135,8 @@ class BaseConstructor:
             raise ConstructorError(None, None,
                     "expected a mapping node, but found %s" % node.id,
                     node.start_mark)
+        if self.strict:
+            return self.construct_strict_mapping(node, deep=deep)
         mapping = {}
         for key_node, value_node in node.value:
             key = self.construct_object(key_node, deep=deep)
@@ -143,6 +146,59 @@ class BaseConstructor:
             value = self.construct_object(value_node, deep=deep)
             mapping[key] = value
         return mapping
+
+    def construct_strict_mapping(self, node, deep=False):
+        # In strict mode every key is constructed and checked for collisions
+        # before any value is constructed, so a collision rejects the whole
+        # mapping without running a single value constructor. Collisions are
+        # detected with the constructed Python keys (hash/eq), not str(key):
+        # two distinct scalar spellings such as 'true' and '1' collide when
+        # they construct to equal Python objects, while '1' and '"1"' do not.
+        # Merged keys have already been prepended by flatten_mapping, so the
+        # iteration order here is the real construction order.
+        keys = []
+        seen = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, collections.abc.Hashable):
+                raise ConstructorError("while constructing a mapping", node.start_mark,
+                        "found unhashable key", key_node.start_mark)
+            if key in seen:
+                first_node = seen[key]
+                if first_node.value == key_node.value:
+                    problem = "found duplicate key %r" % (self.key_label(key_node),)
+                else:
+                    problem = ("found colliding keys %r and %r"
+                               % (self.key_label(first_node),
+                                  self.key_label(key_node)))
+                raise ConstructorError(
+                        "while constructing a mapping", node.start_mark,
+                        "%s:\n  first:  %s\n  second: %s" % (
+                            problem,
+                            self.describe_key_node(first_node),
+                            self.describe_key_node(key_node)),
+                        key_node.start_mark)
+            seen[key] = key_node
+            keys.append(key)
+        mapping = {}
+        for index, (key_node, value_node) in enumerate(node.value):
+            value = self.construct_object(value_node, deep=deep)
+            mapping[keys[index]] = value
+        return mapping
+
+    def key_label(self, key_node):
+        if isinstance(key_node, ScalarNode):
+            return key_node.value
+        return "%s node" % key_node.id
+
+    def describe_key_node(self, key_node):
+        mark = key_node.start_mark
+        location = "line %d, column %d" % (mark.line + 1, mark.column + 1)
+        if isinstance(key_node, ScalarNode):
+            return "scalar %r (tag: %s) at %s" % (
+                    key_node.value, key_node.tag, location)
+        return "%s node (tag: %s) at %s" % (
+                key_node.id, key_node.tag, location)
 
     def construct_pairs(self, node, deep=False):
         if not isinstance(node, MappingNode):
