@@ -5,7 +5,9 @@ __all__ = [
     'FullConstructor',
     'UnsafeConstructor',
     'Constructor',
-    'ConstructorError'
+    'ConstructorError',
+    'ConstructorContract',
+    'constructor_contract'
 ]
 
 from .error import *
@@ -15,6 +17,166 @@ import collections.abc, datetime, base64, binascii, re, sys, types
 
 class ConstructorError(MarkedYAMLError):
     pass
+
+class ConstructorContract:
+    """An explicit contract wrapping a YAML constructor.
+
+    A contract registers the node types the constructor accepts
+    (``scalar``, ``sequence``, ``mapping``) and the category of value it
+    returns (a type, a tuple of types, or one of the named categories
+    ``scalar``, ``sequence``, ``mapping``).  The node is checked *before*
+    the wrapped constructor is called and the returned value is checked
+    *after* the constructor (and any deferred generator finalization) has
+    finished.  Errors raised by a contract are :class:`ConstructorError`
+    instances that carry the tag and the node's start mark (line and
+    column).
+
+    The contract is *explicit*: it is not installed on any loader by
+    default.  Register it with :meth:`BaseConstructor.add_constructor`
+    (or :func:`constructor_contract`) to opt in.  A contract must never be
+    used to enable Python object tags (``!!python/object`` & co.);
+    attempting to do so raises :class:`ConstructorError`.
+    """
+
+    _NODE_TYPE_NAMES = {
+        'scalar': ScalarNode,
+        'sequence': SequenceNode,
+        'mapping': MappingNode,
+    }
+
+    _RETURN_CATEGORIES = {
+        'scalar': (str, int, float, bool, type(None), bytes),
+        'sequence': (list, tuple),
+        'mapping': (dict,),
+    }
+
+    # Tags that must never be enabled through a contract, because they
+    # would bypass the safe-loader restrictions.
+    _FORBIDDEN_TAG_PREFIXES = (
+        'tag:yaml.org,2002:python/object',
+        'tag:yaml.org,2002:python/name',
+        'tag:yaml.org,2002:python/module',
+    )
+
+    def __init__(self, tag, constructor, node_types=None, returns=None):
+        self.tag = tag
+        self.constructor = constructor
+        self.node_types = self._resolve_node_types(node_types)
+        self.returns = returns
+        # Validate the return category up front so a bad contract fails
+        # loudly when it is created, not when it is first used.
+        if returns is not None:
+            self._resolve_return_category(returns)
+        self._check_tag()
+
+    def _check_tag(self):
+        tag = self.tag or ''
+        for prefix in self._FORBIDDEN_TAG_PREFIXES:
+            if tag == prefix or tag.startswith(prefix + ':') \
+                    or tag.startswith(prefix + '/'):
+                raise ConstructorError(None, None,
+                        "constructor contract for tag %r is not allowed: "
+                        "python object tags cannot be enabled by a contract"
+                        % tag, None)
+
+    @classmethod
+    def _resolve_node_types(cls, node_types):
+        if node_types is None:
+            return None
+        if isinstance(node_types, str):
+            node_types = (node_types,)
+        resolved = []
+        for node_type in node_types:
+            if isinstance(node_type, str):
+                name = node_type.lower()
+                if name not in cls._NODE_TYPE_NAMES:
+                    raise ValueError("unknown node type %r" % node_type)
+                resolved.append(cls._NODE_TYPE_NAMES[name])
+            elif isinstance(node_type, type) and issubclass(node_type, Node):
+                resolved.append(node_type)
+            else:
+                raise ValueError("invalid node type %r" % (node_type,))
+        return tuple(resolved)
+
+    def _check_node(self, node):
+        if self.node_types is None:
+            return
+        for allowed in self.node_types:
+            if isinstance(node, allowed):
+                return
+        expected = ', '.join(t.__name__ for t in self.node_types)
+        raise ConstructorError(None, None,
+                "while constructing %s: expected a %s node, but found a %s node"
+                % (self.tag, expected, node.id),
+                node.start_mark)
+
+    def _resolve_return_category(self, returns):
+        if isinstance(returns, str):
+            category = returns.lower()
+            if category not in self._RETURN_CATEGORIES:
+                raise ValueError("unknown return category %r" % returns)
+            return self._RETURN_CATEGORIES[category]
+        if isinstance(returns, type):
+            return (returns,)
+        if isinstance(returns, tuple):
+            return returns
+        raise ValueError("invalid return category %r" % (returns,))
+
+    def _check_return(self, node, value):
+        if self.returns is None:
+            return
+        allowed = self._resolve_return_category(self.returns)
+        if isinstance(value, allowed):
+            return
+        expected = ', '.join(
+                getattr(t, '__name__', repr(t)) for t in allowed)
+        raise ConstructorError(None, None,
+                "while constructing %s: expected a return value of type %s, "
+                "but found %s" % (self.tag, expected, type(value).__name__),
+                node.start_mark)
+
+    def __call__(self, loader, node):
+        self._check_node(node)
+        result = self.constructor(loader, node)
+        if isinstance(result, types.GeneratorType):
+            return self._wrap_generator(loader, node, result)
+        self._check_return(node, result)
+        return result
+
+    def _wrap_generator(self, loader, node, generator):
+        # Run the wrapped generator to its first yield to obtain the
+        # placeholder that the deferred construction protocol expects.
+        try:
+            placeholder = next(generator)
+        except BaseException:
+            generator.close()
+            raise
+        try:
+            yield placeholder
+            # Exhaust the wrapped generator (the deferred finalization).
+            for _ in generator:
+                pass
+        finally:
+            # Always release the wrapped generator so its finally blocks
+            # run and no half-constructed state leaks out.  If the
+            # generator finished normally this is a no-op.
+            generator.close()
+        self._check_return(node, placeholder)
+
+def constructor_contract(tag, node_types=None, returns=None):
+    """Decorator that wraps a constructor in a :class:`ConstructorContract`.
+
+    Example::
+
+        @constructor_contract('!Point', node_types=('mapping',), returns=Point)
+        def construct_point(loader, node):
+            mapping = loader.construct_mapping(node)
+            return Point(**mapping)
+    """
+    def decorator(constructor):
+        return ConstructorContract(tag, constructor,
+                node_types=node_types, returns=returns)
+    return decorator
 
 class BaseConstructor:
 
@@ -56,9 +218,19 @@ class BaseConstructor:
         while self.state_generators:
             state_generators = self.state_generators
             self.state_generators = []
-            for generator in state_generators:
-                for dummy in generator:
-                    pass
+            try:
+                for generator in state_generators:
+                    for dummy in generator:
+                        pass
+            except BaseException:
+                # If a deferred generator fails, close every remaining
+                # generator so that their finally blocks run and no
+                # half-constructed state leaks out.  The failed generator
+                # is already finished (it raised), so closing it is a
+                # harmless no-op.
+                for generator in state_generators:
+                    generator.close()
+                raise
         self.constructed_objects = {}
         self.recursive_objects = {}
         self.deep_construct = False
@@ -102,12 +274,21 @@ class BaseConstructor:
             data = constructor(self, tag_suffix, node)
         if isinstance(data, types.GeneratorType):
             generator = data
-            data = next(generator)
-            if self.deep_construct:
-                for dummy in generator:
-                    pass
-            else:
-                self.state_generators.append(generator)
+            try:
+                data = next(generator)
+                if self.deep_construct:
+                    for dummy in generator:
+                        pass
+                else:
+                    self.state_generators.append(generator)
+            except BaseException:
+                # The constructor failed before it could hand out a
+                # placeholder (or while finalizing it).  Make sure the
+                # node is removed from the recursive set and the generator
+                # is released so no half-object escapes to the caller.
+                self.recursive_objects.pop(node, None)
+                generator.close()
+                raise
         self.constructed_objects[node] = data
         del self.recursive_objects[node]
         if deep:

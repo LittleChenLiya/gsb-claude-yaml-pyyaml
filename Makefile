@@ -26,6 +26,12 @@ sys.path.insert(0, next(str(p) for p in pathlib.Path('build').glob('lib.*'))); \
 import pytest; \
 raise SystemExit(pytest.main())
 
+PYTEST-CONTRACT = \
+import sys; \
+sys.path.insert(0, 'lib'); \
+import pytest; \
+raise SystemExit(pytest.main(['tests/test_constructor_contract.py', '-v']))
+
 TEST=
 PARAMETERS=
 
@@ -79,6 +85,9 @@ test-python: build-python
 
 test-libyaml: buildext
 	$(LIBYAML-ENV) PYYAML_FORCE_LIBYAML=1 python -I -c "$(PYTEST-LIBYAML)"
+
+test-contract:
+	PYYAML_FORCE_LIBYAML=0 python -I -c "$(PYTEST-CONTRACT)"
 
 $(LIBYAML-BUILD):
 	rm -fr $(LIBYAML-DIR)
